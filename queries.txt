@@ -1,0 +1,123 @@
+// =====================================================================================================
+// QUERY USE CASES (UC1-UC4) AND ADVANCED QUERIES (A5-A9)
+// =====================================================================================================
+
+// =============================================================================================
+// UC1 (basic): price-band catalogue
+// Scenario: the buyer needs mid-priced products (5 to 25) grouped into bands for a promotional range.
+// =============================================================================================
+MATCH (p:Product)-[:IN_CATEGORY]->(c:Category)
+WHERE p.unitPrice >= 5 AND p.unitPrice <= 25
+RETURN p.productId AS productId, p.productName AS productName, c.categoryName AS category,
+       p.unitOfMeasure AS unitOfMeasure, p.unitPrice AS unitPrice,
+       CASE WHEN p.unitPrice < 10 THEN 'Budget'
+            WHEN p.unitPrice < 20 THEN 'Standard'
+            ELSE 'Premium' END AS priceBand
+ORDER BY unitPrice;
+
+// =============================================================================================
+// UC2 (intermediate): open-order follow-up with value and age
+// Scenario: procurement reviews every order still Draft or Placed: who raised it, which supplier to chase,
+// how many lines, the order value, and how many days it has been open at the reference date.
+// =============================================================================================
+WITH date('2026-08-31') AS today
+MATCH (po:PurchaseOrder)-[:ORDERED_FROM]->(s:Supplier)
+WHERE po.status IN ['Placed', 'Draft']
+OPTIONAL MATCH (po)-[:CREATED_BY]->(e:ProcurementEmployee)
+OPTIONAL MATCH (po)<-[:LINE_OF]-(pol:PurchaseOrderLine)
+WITH today, po, s, e, count(pol) AS orderLines, sum(pol.quantityOrdered * pol.agreedUnitPrice) AS orderValue
+RETURN po.purchaseOrderId AS purchaseOrderId, po.status AS status, s.supplierName AS supplier,
+       e.employeeName AS raisedBy, orderLines, round(orderValue * 100) / 100 AS orderValue,
+       duration.inDays(po.orderDate, today).days AS daysOpen
+ORDER BY po.orderDate;
+
+// =============================================================================================
+// UC3 (advanced): expiry-risk dashboard per storage location
+// Scenario: the warehouse manager wants, per location, the stock expiring within 180 days of the reference date,
+// banded by urgency, with the units at risk so the most exposed location is cleared first.
+// daysToExpiry is derived at query time (never stored, as in the EER). Uses index batch_expiry_date.
+// =============================================================================================
+WITH date('2026-08-31') AS today
+MATCH (pb:ProductBatch)-[:OF_PRODUCT]->(p:Product)
+MATCH (pb)<-[:OF_BATCH]-(i:Inventory)-[:AT_LOCATION]->(sl:StorageLocation)-[:IN_WAREHOUSE]->(w:Warehouse)
+WITH w, sl, p, pb, i, duration.inDays(today, pb.expiryDate).days AS daysLeft
+WHERE daysLeft <= 180
+WITH w, sl,
+     collect({product: p.productName, batch: pb.batchNumber, units: i.quantityOnHand, daysLeft: daysLeft,
+              urgency: CASE WHEN daysLeft < 0 THEN 'EXPIRED'
+                            WHEN daysLeft <= 30 THEN 'ACT NOW'
+                            WHEN daysLeft <= 150 THEN 'WATCH'
+                            ELSE 'MONITOR' END}) AS atRisk
+RETURN w.warehouseName AS warehouse, sl.locationCode AS location, size(atRisk) AS batches,
+       reduce(total = 0, x IN atRisk | total + x.units) AS unitsAtRisk, atRisk
+ORDER BY unitsAtRisk DESC;
+
+// =============================================================================================
+// UC4 (expert): supplier scorecard with subqueries
+// Scenario: finance and procurement score every supplier on price and delivery performance:
+// =============================================================================================
+CALL { MATCH (l:PurchaseOrderLine) RETURN avg(l.agreedUnitPrice) AS overallAvg }
+MATCH (s:Supplier)
+CALL {
+  WITH s
+  MATCH (s)<-[:ORDERED_FROM]-(:PurchaseOrder)<-[:LINE_OF]-(pol:PurchaseOrderLine)
+  OPTIONAL MATCH (pol)<-[:MATCHES_LINE]-(grl:GoodsReceiptLine)
+  WITH pol, sum(coalesce(grl.quantityReceived, 0)) AS lineReceived
+  RETURN count(pol) AS orderLines, sum(pol.quantityOrdered) AS ordered, sum(lineReceived) AS totalReceived,
+         avg(pol.agreedUnitPrice) AS avgPrice
+}
+RETURN s.supplierId AS supplierId, s.supplierName AS supplier, orderLines, ordered, totalReceived,
+       CASE WHEN ordered = 0 THEN null ELSE round(1000.0 * totalReceived / ordered) / 10 END AS fillRatePct,
+       round(avgPrice * 100) / 100 AS avgAgreedPrice,
+       avgPrice > overallAvg AS aboveAverage
+ORDER BY avgPrice DESC;
+
+
+// =============================================================================================
+// ADVANCED EXTRAS (A5 to A9): independent experimentation with further Cypher features
+// =============================================================================================
+
+// A5. Recall lineage with a named path: trace one batch back to its supplier (the relational equivalent needs 5 joins)
+MATCH path = (pb:ProductBatch {batchNumber: 'TF-260810-A'})-[:RECEIVED_AS]->(:GoodsReceiptLine)
+             -[:MATCHES_LINE]->(:PurchaseOrderLine)-[:LINE_OF]->(:PurchaseOrder)-[:ORDERED_FROM]->(:Supplier)
+RETURN [n IN nodes(path) | labels(n)[0] + ' ' + coalesce(n.batchNumber, n.receiptLineId, n.poLineId,
+                                                          n.purchaseOrderId, n.supplierName)] AS lineage,
+       length(path) AS hops;
+
+// A6. shortestPath over a restricted set of relationship types, ignoring direction
+MATCH (s:Supplier {supplierId: 'S003'}), (sl:StorageLocation {locationCode: 'CHL-B1'})
+MATCH path = shortestPath((s)-[:ORDERED_FROM|LINE_OF|MATCHES_LINE|RECEIVED_AS|OF_BATCH|AT_LOCATION*..8]-(sl))
+RETURN [n IN nodes(path) | labels(n)[0]] AS labelsOnPath, length(path) AS hops;
+
+// A7. COUNT { } and EXISTS { } subquery expressions: orders still waiting for any delivery
+MATCH (po:PurchaseOrder)
+WHERE NOT EXISTS { (po)<-[:RECEIPT_FOR]-(:GoodsReceipt) }
+RETURN po.purchaseOrderId AS purchaseOrderId, po.status AS status,
+       COUNT { (po)<-[:LINE_OF]-(:PurchaseOrderLine) } AS orderLines
+ORDER BY purchaseOrderId;
+
+// A8. Stock position per product: on hand + on open order, with a low-stock flag (OPTIONAL MATCH, coalesce, CASE)
+MATCH (p:Product)
+OPTIONAL MATCH (p)<-[:OF_PRODUCT]-(:ProductBatch)<-[:OF_BATCH]-(i:Inventory)
+WITH p, coalesce(sum(i.quantityOnHand), 0) AS onHand
+OPTIONAL MATCH (p)<-[:FOR_PRODUCT]-(pol:PurchaseOrderLine)-[:LINE_OF]->(po:PurchaseOrder)
+WHERE po.status IN ['Placed', 'Draft']
+WITH p, onHand, coalesce(sum(pol.quantityOrdered), 0) AS onOrder
+RETURN p.productId AS productId, p.productName AS productName, onHand, onOrder, onHand + onOrder AS projected,
+       CASE WHEN onHand + onOrder < 50 THEN 'LOW' ELSE 'OK' END AS stockFlag
+ORDER BY projected;
+
+// A9. CALL { } with UNION: one alert feed combining expiry alerts and open-order alerts
+CALL {
+  MATCH (pb:ProductBatch)<-[:OF_BATCH]-(:Inventory)
+  WHERE pb.expiryDate <= date('2026-08-31') + duration({days: 30})
+  RETURN 'EXPIRY' AS alertType, pb.batchNumber AS reference, 'Expires ' + toString(pb.expiryDate) AS detail
+  UNION
+  MATCH (po:PurchaseOrder)
+  WHERE NOT EXISTS { (po)<-[:RECEIPT_FOR]-(:GoodsReceipt) }
+  RETURN 'OPEN ORDER' AS alertType, po.purchaseOrderId AS reference,
+         po.status + ' since ' + toString(po.orderDate) AS detail
+}
+RETURN alertType, reference, detail
+ORDER BY alertType, reference;
+

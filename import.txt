@@ -1,0 +1,771 @@
+// =====================================================================================================
+// AUFS FOOD WAREHOUSE: COMPLETE NEO4J CYPHER CODE
+// Environment used: Neo4j Desktop 2.2.1, Neo4j 5.26.19, Graph Data Science 2.13.7.
+
+// =====================================================================================================
+// PART 0. CSV HEADER CHECK (diagnostic)
+// =====================================================================================================
+
+LOAD CSV WITH HEADERS FROM 'file:///category.csv' AS row
+RETURN 'category.csv' AS file, keys(row) AS headers LIMIT 1
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///product.csv' AS row
+RETURN 'product.csv' AS file, keys(row) AS headers LIMIT 1
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///supplier.csv' AS row
+RETURN 'supplier.csv' AS file, keys(row) AS headers LIMIT 1
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///supplier_phone.csv' AS row
+RETURN 'supplier_phone.csv' AS file, keys(row) AS headers LIMIT 1
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///supplier_product.csv' AS row
+RETURN 'supplier_product.csv' AS file, keys(row) AS headers LIMIT 1
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///employee.csv' AS row
+RETURN 'employee.csv' AS file, keys(row) AS headers LIMIT 1
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///purchase_order.csv' AS row
+RETURN 'purchase_order.csv' AS file, keys(row) AS headers LIMIT 1
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///purchase_order_line.csv' AS row
+RETURN 'purchase_order_line.csv' AS file, keys(row) AS headers LIMIT 1
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///goods_receipt.csv' AS row
+RETURN 'goods_receipt.csv' AS file, keys(row) AS headers LIMIT 1
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///goods_receipt_line.csv' AS row
+RETURN 'goods_receipt_line.csv' AS file, keys(row) AS headers LIMIT 1
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///product_batch.csv' AS row
+RETURN 'product_batch.csv' AS file, keys(row) AS headers LIMIT 1
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///warehouse.csv' AS row
+RETURN 'warehouse.csv' AS file, keys(row) AS headers LIMIT 1
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///storage_location.csv' AS row
+RETURN 'storage_location.csv' AS file, keys(row) AS headers LIMIT 1
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///inventory.csv' AS row
+RETURN 'inventory.csv' AS file, keys(row) AS headers LIMIT 1
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///stock_transaction.csv' AS row
+RETURN 'stock_transaction.csv' AS file, keys(row) AS headers LIMIT 1
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///stock_adjustment.csv' AS row
+RETURN 'stock_adjustment.csv' AS file, keys(row) AS headers LIMIT 1
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///disposal_record.csv' AS row
+RETURN 'disposal_record.csv' AS file, keys(row) AS headers LIMIT 1;
+
+
+// =====================================================================================================
+// PART 1. CONSTRAINTS AND INDEXES
+// =====================================================================================================
+
+CREATE CONSTRAINT category_id IF NOT EXISTS FOR (n:Category) REQUIRE n.categoryId IS UNIQUE;
+CREATE CONSTRAINT category_name IF NOT EXISTS FOR (n:Category) REQUIRE n.categoryName IS UNIQUE;
+CREATE CONSTRAINT product_id IF NOT EXISTS FOR (n:Product) REQUIRE n.productId IS UNIQUE;
+CREATE CONSTRAINT product_sku IF NOT EXISTS FOR (n:Product) REQUIRE n.sku IS UNIQUE;
+CREATE CONSTRAINT supplier_id IF NOT EXISTS FOR (n:Supplier) REQUIRE n.supplierId IS UNIQUE;
+CREATE CONSTRAINT supplier_email IF NOT EXISTS FOR (n:Supplier) REQUIRE n.email IS UNIQUE;
+CREATE CONSTRAINT employee_id IF NOT EXISTS FOR (n:Employee) REQUIRE n.employeeId IS UNIQUE;
+CREATE CONSTRAINT po_id IF NOT EXISTS FOR (n:PurchaseOrder) REQUIRE n.purchaseOrderId IS UNIQUE;
+CREATE CONSTRAINT pol_id IF NOT EXISTS FOR (n:PurchaseOrderLine) REQUIRE n.poLineId IS UNIQUE;
+CREATE CONSTRAINT gr_id IF NOT EXISTS FOR (n:GoodsReceipt) REQUIRE n.goodsReceiptId IS UNIQUE;
+CREATE CONSTRAINT grl_id IF NOT EXISTS FOR (n:GoodsReceiptLine) REQUIRE n.receiptLineId IS UNIQUE;
+CREATE CONSTRAINT batch_id IF NOT EXISTS FOR (n:ProductBatch) REQUIRE n.batchId IS UNIQUE;
+CREATE CONSTRAINT warehouse_id IF NOT EXISTS FOR (n:Warehouse) REQUIRE n.warehouseId IS UNIQUE;
+CREATE CONSTRAINT location_id IF NOT EXISTS FOR (n:StorageLocation) REQUIRE n.locationId IS UNIQUE;
+CREATE CONSTRAINT location_key IF NOT EXISTS FOR (n:StorageLocation) REQUIRE n.locationKey IS UNIQUE;
+CREATE CONSTRAINT inventory_id IF NOT EXISTS FOR (n:Inventory) REQUIRE n.inventoryId IS UNIQUE;
+CREATE CONSTRAINT inventory_key IF NOT EXISTS FOR (n:Inventory) REQUIRE n.inventoryKey IS UNIQUE;
+CREATE CONSTRAINT txn_id IF NOT EXISTS FOR (n:StockTransaction) REQUIRE n.transactionId IS UNIQUE;
+CREATE CONSTRAINT adjustment_id IF NOT EXISTS FOR (n:StockAdjustment) REQUIRE n.adjustmentId IS UNIQUE;
+CREATE CONSTRAINT disposal_id IF NOT EXISTS FOR (n:DisposalRecord) REQUIRE n.disposalId IS UNIQUE;
+
+CREATE INDEX batch_expiry_date IF NOT EXISTS FOR (pb:ProductBatch) ON (pb.expiryDate);
+CREATE INDEX po_status IF NOT EXISTS FOR (po:PurchaseOrder) ON (po.status);
+CREATE INDEX product_unit_price IF NOT EXISTS FOR (p:Product) ON (p.unitPrice);
+CREATE TEXT INDEX product_name_text IF NOT EXISTS FOR (p:Product) ON (p.productName);
+CALL db.awaitIndexes(300);
+SHOW CONSTRAINTS;
+SHOW INDEXES;
+
+// =====================================================================================================
+// PART 2. NODE IMPORT
+// =====================================================================================================
+// 1. Category
+:auto LOAD CSV WITH HEADERS FROM 'file:///category.csv' AS row
+CALL {
+  WITH row
+  MERGE (n:Category {categoryId: row.CategoryID})
+  SET n.categoryName = CASE row.CategoryName WHEN '' THEN null ELSE row.CategoryName END
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 2. Product
+:auto LOAD CSV WITH HEADERS FROM 'file:///product.csv' AS row
+CALL {
+  WITH row
+  MERGE (n:Product {productId: row.ProductID})
+  SET n.productName = CASE row.ProductName WHEN '' THEN null ELSE row.ProductName END,
+      n.sku = CASE row.SKU WHEN '' THEN null ELSE row.SKU END,
+      n.unitOfMeasure = CASE row.UnitOfMeasure WHEN '' THEN null ELSE row.UnitOfMeasure END,
+      n.unitPrice = CASE row.UnitPrice WHEN '' THEN null ELSE toFloat(row.UnitPrice) END
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 3. Supplier (phones list is filled from supplier_phone.csv next)
+:auto LOAD CSV WITH HEADERS FROM 'file:///supplier.csv' AS row
+CALL {
+  WITH row
+  MERGE (n:Supplier {supplierId: row.SupplierID})
+  SET n.supplierName = CASE row.SupplierName WHEN '' THEN null ELSE row.SupplierName END,
+      n.email = CASE row.Email WHEN '' THEN null ELSE row.Email END,
+      n.phones = []
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 3b. Supplier phones: SUPPLIER_PHONE table folded into Supplier.phones
+LOAD CSV WITH HEADERS FROM 'file:///supplier_phone.csv' AS row
+WITH row.SupplierID AS sid, collect(row.PhoneNumber) AS phones
+MATCH (s:Supplier {supplierId: sid})
+SET s.phones = phones;
+
+// 4. Employee + subtype labels
+:auto LOAD CSV WITH HEADERS FROM 'file:///employee.csv' AS row
+CALL {
+  WITH row
+  MERGE (e:Employee {employeeId: row.EmployeeID})
+  SET e.employeeName = CASE row.EmployeeName WHEN '' THEN null ELSE row.EmployeeName END,
+      e.employeeType = CASE row.EmployeeType WHEN '' THEN null ELSE row.EmployeeType END
+  // ---- Generalisation: one subtype label per employee. ADJUST THE KEYWORDS to your EmployeeType values. ----
+  // Check with: SELECT DISTINCT EmployeeType FROM EMPLOYEE;
+  FOREACH (_ IN CASE WHEN toLower(row.EmployeeType) CONTAINS 'procure' THEN [1] ELSE [] END | SET e:ProcurementEmployee)
+  FOREACH (_ IN CASE WHEN toLower(row.EmployeeType) CONTAINS 'warehouse' THEN [1] ELSE [] END | SET e:WarehouseEmployee)
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 5. PurchaseOrder
+:auto LOAD CSV WITH HEADERS FROM 'file:///purchase_order.csv' AS row
+CALL {
+  WITH row
+  MERGE (n:PurchaseOrder {purchaseOrderId: row.PurchaseOrderID})
+  SET n.orderDate = CASE row.OrderDate WHEN '' THEN null ELSE date(row.OrderDate) END,
+      n.status = CASE row.Status WHEN '' THEN null ELSE row.Status END
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 6. PurchaseOrderLine
+:auto LOAD CSV WITH HEADERS FROM 'file:///purchase_order_line.csv' AS row
+CALL {
+  WITH row
+  MERGE (n:PurchaseOrderLine {poLineId: row.POLineID})
+  SET n.quantityOrdered = CASE row.QuantityOrdered WHEN '' THEN null ELSE toInteger(row.QuantityOrdered) END,
+      n.agreedUnitPrice = CASE row.AgreedUnitPrice WHEN '' THEN null ELSE toFloat(row.AgreedUnitPrice) END
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 7. GoodsReceipt
+:auto LOAD CSV WITH HEADERS FROM 'file:///goods_receipt.csv' AS row
+CALL {
+  WITH row
+  MERGE (n:GoodsReceipt {goodsReceiptId: row.GoodsReceiptID})
+  SET n.receiptDate = CASE row.ReceiptDate WHEN '' THEN null ELSE date(row.ReceiptDate) END
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 8. GoodsReceiptLine
+:auto LOAD CSV WITH HEADERS FROM 'file:///goods_receipt_line.csv' AS row
+CALL {
+  WITH row
+  MERGE (n:GoodsReceiptLine {receiptLineId: row.GoodsReceiptLineID})
+  SET n.quantityReceived = CASE row.QuantityReceived WHEN '' THEN null ELSE toInteger(row.QuantityReceived) END
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 9. ProductBatch 
+:auto LOAD CSV WITH HEADERS FROM 'file:///product_batch.csv' AS row
+CALL {
+  WITH row
+  MERGE (n:ProductBatch {batchId: row.BatchID})
+  SET n.batchNumber = CASE row.BatchNumber WHEN '' THEN null ELSE row.BatchNumber END,
+      n.manufactureDate = CASE row.ManufactureDate WHEN '' THEN null ELSE date(row.ManufactureDate) END,
+      n.expiryDate = CASE row.ExpiryDate WHEN '' THEN null ELSE date(row.ExpiryDate) END
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 10. Warehouse
+:auto LOAD CSV WITH HEADERS FROM 'file:///warehouse.csv' AS row
+CALL {
+  WITH row
+  MERGE (n:Warehouse {warehouseId: row.WarehouseID})
+  SET n.warehouseName = CASE row.WarehouseName WHEN '' THEN null ELSE row.WarehouseName END,
+      n.warehouseAddress = CASE row.WarehouseAddress WHEN '' THEN null ELSE row.WarehouseAddress END
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 11. StorageLocation
+:auto LOAD CSV WITH HEADERS FROM 'file:///storage_location.csv' AS row
+CALL {
+  WITH row
+  MERGE (n:StorageLocation {locationId: row.LocationID})
+  SET n.locationKey = row.WarehouseID + '|' + row.LocationCode,
+      n.locationCode = CASE row.LocationCode WHEN '' THEN null ELSE row.LocationCode END
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 12. Inventory
+:auto LOAD CSV WITH HEADERS FROM 'file:///inventory.csv' AS row
+CALL {
+  WITH row
+  MERGE (n:Inventory {inventoryId: row.InventoryID})
+  SET n.inventoryKey = row.BatchID + '|' + row.LocationID,
+      n.quantityOnHand = CASE row.QuantityOnHand WHEN '' THEN null ELSE toInteger(row.QuantityOnHand) END
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 13. StockTransaction
+:auto LOAD CSV WITH HEADERS FROM 'file:///stock_transaction.csv' AS row
+CALL {
+  WITH row
+  MERGE (n:StockTransaction {transactionId: row.TransactionID})
+  SET n.transactionType = CASE row.TransactionType WHEN '' THEN null ELSE row.TransactionType END,
+      n.quantityMoved = CASE row.QuantityMoved WHEN '' THEN null ELSE toInteger(row.QuantityMoved) END,
+      n.transactionDate = CASE row.TransactionDate WHEN '' THEN null ELSE date(row.TransactionDate) END
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 14. StockAdjustment
+:auto LOAD CSV WITH HEADERS FROM 'file:///stock_adjustment.csv' AS row
+CALL {
+  WITH row
+  MERGE (n:StockAdjustment {adjustmentId: row.AdjustmentID})
+  SET n.adjustmentDate = CASE row.AdjustmentDate WHEN '' THEN null ELSE date(row.AdjustmentDate) END,
+      n.quantityChange = CASE row.QuantityChange WHEN '' THEN null ELSE toInteger(row.QuantityChange) END,
+      n.reason = CASE row.Reason WHEN '' THEN null ELSE row.Reason END
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 15. DisposalRecord
+:auto LOAD CSV WITH HEADERS FROM 'file:///disposal_record.csv' AS row
+CALL {
+  WITH row
+  MERGE (n:DisposalRecord {disposalId: row.DisposalID})
+  SET n.quantityDisposed = CASE row.QuantityDisposed WHEN '' THEN null ELSE toInteger(row.QuantityDisposed) END,
+      n.disposalDate = CASE row.DisposalDate WHEN '' THEN null ELSE date(row.DisposalDate) END,
+      n.reason = CASE row.Reason WHEN '' THEN null ELSE row.Reason END
+} IN TRANSACTIONS OF 500 ROWS;
+
+
+// =====================================================================================================
+// PART 3. RELATIONSHIP IMPORT
+// =====================================================================================================
+
+// 1. Product -[:IN_CATEGORY]-> Category
+:auto LOAD CSV WITH HEADERS FROM 'file:///product.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:Product {productId: row.ProductID})
+  MATCH (b:Category {categoryId: row.CategoryID})
+  MERGE (a)-[:IN_CATEGORY]->(b)
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 2. Supplier -[:SUPPLIED_PRODUCT {supplierSKU, standardCost}]-> Product (UML association class)
+:auto LOAD CSV WITH HEADERS FROM 'file:///supplier_product.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:Supplier {supplierId: row.SupplierID})
+  MATCH (b:Product {productId: row.ProductID})
+  MERGE (a)-[r:SUPPLIED_PRODUCT]->(b)
+  SET r.supplierSKU = CASE row.SupplierSKU WHEN '' THEN null ELSE row.SupplierSKU END,
+      r.standardCost = CASE row.StandardCost WHEN '' THEN null ELSE toFloat(row.StandardCost) END
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 3a. PurchaseOrder -[:ORDERED_FROM]-> Supplier
+:auto LOAD CSV WITH HEADERS FROM 'file:///purchase_order.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:PurchaseOrder {purchaseOrderId: row.PurchaseOrderID})
+  MATCH (b:Supplier {supplierId: row.SupplierID})
+  MERGE (a)-[:ORDERED_FROM]->(b)
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 3b. PurchaseOrder -[:CREATED_BY]-> ProcurementEmployee
+:auto LOAD CSV WITH HEADERS FROM 'file:///purchase_order.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:PurchaseOrder {purchaseOrderId: row.PurchaseOrderID})
+  MATCH (b:Employee:ProcurementEmployee {employeeId: row.EmployeeID})
+  MERGE (a)-[:CREATED_BY]->(b)
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 4a. PurchaseOrderLine -[:LINE_OF]-> PurchaseOrder
+:auto LOAD CSV WITH HEADERS FROM 'file:///purchase_order_line.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:PurchaseOrderLine {poLineId: row.POLineID})
+  MATCH (b:PurchaseOrder {purchaseOrderId: row.PurchaseOrderID})
+  MERGE (a)-[:LINE_OF]->(b)
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 4b. PurchaseOrderLine -[:FOR_PRODUCT]-> Product
+:auto LOAD CSV WITH HEADERS FROM 'file:///purchase_order_line.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:PurchaseOrderLine {poLineId: row.POLineID})
+  MATCH (b:Product {productId: row.ProductID})
+  MERGE (a)-[:FOR_PRODUCT]->(b)
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 5a. GoodsReceipt -[:RECEIPT_FOR]-> PurchaseOrder
+:auto LOAD CSV WITH HEADERS FROM 'file:///goods_receipt.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:GoodsReceipt {goodsReceiptId: row.GoodsReceiptID})
+  MATCH (b:PurchaseOrder {purchaseOrderId: row.PurchaseOrderID})
+  MERGE (a)-[:RECEIPT_FOR]->(b)
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 5b. GoodsReceipt -[:RECEIVED_BY]-> WarehouseEmployee
+:auto LOAD CSV WITH HEADERS FROM 'file:///goods_receipt.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:GoodsReceipt {goodsReceiptId: row.GoodsReceiptID})
+  MATCH (b:Employee:WarehouseEmployee {employeeId: row.EmployeeID})
+  MERGE (a)-[:RECEIVED_BY]->(b)
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 6a. GoodsReceiptLine -[:RECEIPT_LINE_OF]-> GoodsReceipt
+:auto LOAD CSV WITH HEADERS FROM 'file:///goods_receipt_line.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:GoodsReceiptLine {receiptLineId: row.GoodsReceiptLineID})
+  MATCH (b:GoodsReceipt {goodsReceiptId: row.GoodsReceiptID})
+  MERGE (a)-[:RECEIPT_LINE_OF]->(b)
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 6b. GoodsReceiptLine -[:MATCHES_LINE]-> PurchaseOrderLine
+:auto LOAD CSV WITH HEADERS FROM 'file:///goods_receipt_line.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:GoodsReceiptLine {receiptLineId: row.GoodsReceiptLineID})
+  MATCH (b:PurchaseOrderLine {poLineId: row.POLineID})
+  MERGE (a)-[:MATCHES_LINE]->(b)
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 7. ProductBatch -[:RECEIVED_AS]-> GoodsReceiptLine
+:auto LOAD CSV WITH HEADERS FROM 'file:///product_batch.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:ProductBatch {batchId: row.BatchID})
+  MATCH (b:GoodsReceiptLine {receiptLineId: row.GoodsReceiptLineID})
+  MERGE (a)-[:RECEIVED_AS]->(b)
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 8. ProductBatch -[:OF_PRODUCT]-> Product  (DERIVED shortcut = optimisation, justified and benchmarked in 06)
+// Built from data already in the graph, so it can never disagree with the 3-hop path (checked in 04).
+MATCH (pb:ProductBatch)-[:RECEIVED_AS]->(:GoodsReceiptLine)-[:MATCHES_LINE]->(:PurchaseOrderLine)-[:FOR_PRODUCT]->(p:Product)
+MERGE (pb)-[:OF_PRODUCT]->(p);
+
+// 9. StorageLocation -[:IN_WAREHOUSE]-> Warehouse
+:auto LOAD CSV WITH HEADERS FROM 'file:///storage_location.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:StorageLocation {locationId: row.LocationID})
+  MATCH (b:Warehouse {warehouseId: row.WarehouseID})
+  MERGE (a)-[:IN_WAREHOUSE]->(b)
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 10a. Inventory -[:AT_LOCATION]-> StorageLocation
+:auto LOAD CSV WITH HEADERS FROM 'file:///inventory.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:Inventory {inventoryId: row.InventoryID})
+  MATCH (b:StorageLocation {locationId: row.LocationID})
+  MERGE (a)-[:AT_LOCATION]->(b)
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 10b. Inventory -[:OF_BATCH]-> ProductBatch
+:auto LOAD CSV WITH HEADERS FROM 'file:///inventory.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:Inventory {inventoryId: row.InventoryID})
+  MATCH (b:ProductBatch {batchId: row.BatchID})
+  MERGE (a)-[:OF_BATCH]->(b)
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 11a. StockTransaction -[:MOVES_BATCH]-> ProductBatch
+:auto LOAD CSV WITH HEADERS FROM 'file:///stock_transaction.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:StockTransaction {transactionId: row.TransactionID})
+  MATCH (b:ProductBatch {batchId: row.BatchID})
+  MERGE (a)-[:MOVES_BATCH]->(b)
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 11b. StockTransaction -[:FROM_LOCATION]-> StorageLocation (optional, 0..1)
+:auto LOAD CSV WITH HEADERS FROM 'file:///stock_transaction.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:StockTransaction {transactionId: row.TransactionID})
+  MATCH (b:StorageLocation {locationId: row.FromLocationID})
+  MERGE (a)-[:FROM_LOCATION]->(b)
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 11c. StockTransaction -[:TO_LOCATION]-> StorageLocation (optional, 0..1)
+:auto LOAD CSV WITH HEADERS FROM 'file:///stock_transaction.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:StockTransaction {transactionId: row.TransactionID})
+  MATCH (b:StorageLocation {locationId: row.ToLocationID})
+  MERGE (a)-[:TO_LOCATION]->(b)
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 11d. StockTransaction -[:PERFORMED_BY]-> WarehouseEmployee
+:auto LOAD CSV WITH HEADERS FROM 'file:///stock_transaction.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:StockTransaction {transactionId: row.TransactionID})
+  MATCH (b:Employee:WarehouseEmployee {employeeId: row.EmployeeID})
+  MERGE (a)-[:PERFORMED_BY]->(b)
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 12a. StockAdjustment -[:ADJUSTS]-> Inventory
+:auto LOAD CSV WITH HEADERS FROM 'file:///stock_adjustment.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:StockAdjustment {adjustmentId: row.AdjustmentID})
+  MATCH (b:Inventory {inventoryId: row.InventoryID})
+  MERGE (a)-[:ADJUSTS]->(b)
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 12b. StockAdjustment -[:PERFORMED_BY]-> WarehouseEmployee
+:auto LOAD CSV WITH HEADERS FROM 'file:///stock_adjustment.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:StockAdjustment {adjustmentId: row.AdjustmentID})
+  MATCH (b:Employee:WarehouseEmployee {employeeId: row.EmployeeID})
+  MERGE (a)-[:PERFORMED_BY]->(b)
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 13a. DisposalRecord -[:DISPOSES_FROM]-> Inventory
+:auto LOAD CSV WITH HEADERS FROM 'file:///disposal_record.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:DisposalRecord {disposalId: row.DisposalID})
+  MATCH (b:Inventory {inventoryId: row.InventoryID})
+  MERGE (a)-[:DISPOSES_FROM]->(b)
+} IN TRANSACTIONS OF 500 ROWS;
+
+// 13b. DisposalRecord -[:PERFORMED_BY]-> WarehouseEmployee
+:auto LOAD CSV WITH HEADERS FROM 'file:///disposal_record.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:DisposalRecord {disposalId: row.DisposalID})
+  MATCH (b:Employee:WarehouseEmployee {employeeId: row.EmployeeID})
+  MERGE (a)-[:PERFORMED_BY]->(b)
+} IN TRANSACTIONS OF 500 ROWS;
+
+
+// =====================================================================================================
+// PART 4. COUNT QUERIES AFTER IMPORT
+// =====================================================================================================
+
+// One-panel summary
+CALL { MATCH (n) RETURN count(n) AS totalNodes }
+CALL { MATCH ()-[r]->() RETURN count(r) AS totalRelationships }
+CALL { MATCH (n) UNWIND labels(n) AS l RETURN count(DISTINCT l) AS labelsUsed }
+CALL { MATCH ()-[r]->() RETURN count(DISTINCT type(r)) AS relationshipTypes }
+RETURN totalNodes, totalRelationships, labelsUsed, relationshipTypes;
+
+
+// =====================================================================================================
+// PART 5. RECONCILIATION AND INTEGRITY CHECKS
+// =====================================================================================================
+
+// 04_validate.cypher
+
+// ===== Part A1: node counts, CSV rows vs graph =====
+
+LOAD CSV WITH HEADERS FROM 'file:///category.csv' AS row
+WITH count(row) AS expected
+CALL { MATCH (n:Category) RETURN count(n) AS actual }
+RETURN 'node Category' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///product.csv' AS row
+WITH count(row) AS expected
+CALL { MATCH (n:Product) RETURN count(n) AS actual }
+RETURN 'node Product' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///supplier.csv' AS row
+WITH count(row) AS expected
+CALL { MATCH (n:Supplier) RETURN count(n) AS actual }
+RETURN 'node Supplier' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///employee.csv' AS row
+WITH count(row) AS expected
+CALL { MATCH (n:Employee) RETURN count(n) AS actual }
+RETURN 'node Employee' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///purchase_order.csv' AS row
+WITH count(row) AS expected
+CALL { MATCH (n:PurchaseOrder) RETURN count(n) AS actual }
+RETURN 'node PurchaseOrder' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///purchase_order_line.csv' AS row
+WITH count(row) AS expected
+CALL { MATCH (n:PurchaseOrderLine) RETURN count(n) AS actual }
+RETURN 'node PurchaseOrderLine' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///goods_receipt.csv' AS row
+WITH count(row) AS expected
+CALL { MATCH (n:GoodsReceipt) RETURN count(n) AS actual }
+RETURN 'node GoodsReceipt' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///goods_receipt_line.csv' AS row
+WITH count(row) AS expected
+CALL { MATCH (n:GoodsReceiptLine) RETURN count(n) AS actual }
+RETURN 'node GoodsReceiptLine' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///product_batch.csv' AS row
+WITH count(row) AS expected
+CALL { MATCH (n:ProductBatch) RETURN count(n) AS actual }
+RETURN 'node ProductBatch' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///warehouse.csv' AS row
+WITH count(row) AS expected
+CALL { MATCH (n:Warehouse) RETURN count(n) AS actual }
+RETURN 'node Warehouse' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///storage_location.csv' AS row
+WITH count(row) AS expected
+CALL { MATCH (n:StorageLocation) RETURN count(n) AS actual }
+RETURN 'node StorageLocation' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///inventory.csv' AS row
+WITH count(row) AS expected
+CALL { MATCH (n:Inventory) RETURN count(n) AS actual }
+RETURN 'node Inventory' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///stock_transaction.csv' AS row
+WITH count(row) AS expected
+CALL { MATCH (n:StockTransaction) RETURN count(n) AS actual }
+RETURN 'node StockTransaction' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///stock_adjustment.csv' AS row
+WITH count(row) AS expected
+CALL { MATCH (n:StockAdjustment) RETURN count(n) AS actual }
+RETURN 'node StockAdjustment' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///disposal_record.csv' AS row
+WITH count(row) AS expected
+CALL { MATCH (n:DisposalRecord) RETURN count(n) AS actual }
+RETURN 'node DisposalRecord' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///supplier_phone.csv' AS row
+WITH count(row) AS expected
+CALL { MATCH (s:Supplier) RETURN sum(size(s.phones)) AS actual }
+RETURN 'supplier phones (list entries)' AS item, expected, actual, expected = actual AS ok;
+
+// ===== Part A2: relationship counts, rows with a non-empty foreign key vs relationships created =====
+
+LOAD CSV WITH HEADERS FROM 'file:///product.csv' AS row
+WITH row WHERE row.CategoryID IS NOT NULL AND row.CategoryID <> ''
+WITH count(row) AS expected
+CALL { MATCH (:Product)-[r:IN_CATEGORY]->() RETURN count(r) AS actual }
+RETURN 'rel (:Product)-[:IN_CATEGORY]->' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///supplier_product.csv' AS row
+WITH row WHERE row.ProductID IS NOT NULL AND row.ProductID <> ''
+WITH count(row) AS expected
+CALL { MATCH (:Supplier)-[r:SUPPLIED_PRODUCT]->() RETURN count(r) AS actual }
+RETURN 'rel (:Supplier)-[:SUPPLIED_PRODUCT]->' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///purchase_order.csv' AS row
+WITH row WHERE row.SupplierID IS NOT NULL AND row.SupplierID <> ''
+WITH count(row) AS expected
+CALL { MATCH (:PurchaseOrder)-[r:ORDERED_FROM]->() RETURN count(r) AS actual }
+RETURN 'rel (:PurchaseOrder)-[:ORDERED_FROM]->' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///purchase_order.csv' AS row
+WITH row WHERE row.EmployeeID IS NOT NULL AND row.EmployeeID <> ''
+WITH count(row) AS expected
+CALL { MATCH (:PurchaseOrder)-[r:CREATED_BY]->() RETURN count(r) AS actual }
+RETURN 'rel (:PurchaseOrder)-[:CREATED_BY]->' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///purchase_order_line.csv' AS row
+WITH row WHERE row.PurchaseOrderID IS NOT NULL AND row.PurchaseOrderID <> ''
+WITH count(row) AS expected
+CALL { MATCH (:PurchaseOrderLine)-[r:LINE_OF]->() RETURN count(r) AS actual }
+RETURN 'rel (:PurchaseOrderLine)-[:LINE_OF]->' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///purchase_order_line.csv' AS row
+WITH row WHERE row.ProductID IS NOT NULL AND row.ProductID <> ''
+WITH count(row) AS expected
+CALL { MATCH (:PurchaseOrderLine)-[r:FOR_PRODUCT]->() RETURN count(r) AS actual }
+RETURN 'rel (:PurchaseOrderLine)-[:FOR_PRODUCT]->' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///goods_receipt.csv' AS row
+WITH row WHERE row.PurchaseOrderID IS NOT NULL AND row.PurchaseOrderID <> ''
+WITH count(row) AS expected
+CALL { MATCH (:GoodsReceipt)-[r:RECEIPT_FOR]->() RETURN count(r) AS actual }
+RETURN 'rel (:GoodsReceipt)-[:RECEIPT_FOR]->' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///goods_receipt.csv' AS row
+WITH row WHERE row.EmployeeID IS NOT NULL AND row.EmployeeID <> ''
+WITH count(row) AS expected
+CALL { MATCH (:GoodsReceipt)-[r:RECEIVED_BY]->() RETURN count(r) AS actual }
+RETURN 'rel (:GoodsReceipt)-[:RECEIVED_BY]->' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///goods_receipt_line.csv' AS row
+WITH row WHERE row.GoodsReceiptID IS NOT NULL AND row.GoodsReceiptID <> ''
+WITH count(row) AS expected
+CALL { MATCH (:GoodsReceiptLine)-[r:RECEIPT_LINE_OF]->() RETURN count(r) AS actual }
+RETURN 'rel (:GoodsReceiptLine)-[:RECEIPT_LINE_OF]->' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///goods_receipt_line.csv' AS row
+WITH row WHERE row.POLineID IS NOT NULL AND row.POLineID <> ''
+WITH count(row) AS expected
+CALL { MATCH (:GoodsReceiptLine)-[r:MATCHES_LINE]->() RETURN count(r) AS actual }
+RETURN 'rel (:GoodsReceiptLine)-[:MATCHES_LINE]->' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///product_batch.csv' AS row
+WITH row WHERE row.GoodsReceiptLineID IS NOT NULL AND row.GoodsReceiptLineID <> ''
+WITH count(row) AS expected
+CALL { MATCH (:ProductBatch)-[r:RECEIVED_AS]->() RETURN count(r) AS actual }
+RETURN 'rel (:ProductBatch)-[:RECEIVED_AS]->' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///storage_location.csv' AS row
+WITH row WHERE row.WarehouseID IS NOT NULL AND row.WarehouseID <> ''
+WITH count(row) AS expected
+CALL { MATCH (:StorageLocation)-[r:IN_WAREHOUSE]->() RETURN count(r) AS actual }
+RETURN 'rel (:StorageLocation)-[:IN_WAREHOUSE]->' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///inventory.csv' AS row
+WITH row WHERE row.LocationID IS NOT NULL AND row.LocationID <> ''
+WITH count(row) AS expected
+CALL { MATCH (:Inventory)-[r:AT_LOCATION]->() RETURN count(r) AS actual }
+RETURN 'rel (:Inventory)-[:AT_LOCATION]->' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///inventory.csv' AS row
+WITH row WHERE row.BatchID IS NOT NULL AND row.BatchID <> ''
+WITH count(row) AS expected
+CALL { MATCH (:Inventory)-[r:OF_BATCH]->() RETURN count(r) AS actual }
+RETURN 'rel (:Inventory)-[:OF_BATCH]->' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///stock_transaction.csv' AS row
+WITH row WHERE row.BatchID IS NOT NULL AND row.BatchID <> ''
+WITH count(row) AS expected
+CALL { MATCH (:StockTransaction)-[r:MOVES_BATCH]->() RETURN count(r) AS actual }
+RETURN 'rel (:StockTransaction)-[:MOVES_BATCH]->' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///stock_transaction.csv' AS row
+WITH row WHERE row.FromLocationID IS NOT NULL AND row.FromLocationID <> ''
+WITH count(row) AS expected
+CALL { MATCH (:StockTransaction)-[r:FROM_LOCATION]->() RETURN count(r) AS actual }
+RETURN 'rel (:StockTransaction)-[:FROM_LOCATION]->' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///stock_transaction.csv' AS row
+WITH row WHERE row.ToLocationID IS NOT NULL AND row.ToLocationID <> ''
+WITH count(row) AS expected
+CALL { MATCH (:StockTransaction)-[r:TO_LOCATION]->() RETURN count(r) AS actual }
+RETURN 'rel (:StockTransaction)-[:TO_LOCATION]->' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///stock_transaction.csv' AS row
+WITH row WHERE row.EmployeeID IS NOT NULL AND row.EmployeeID <> ''
+WITH count(row) AS expected
+CALL { MATCH (:StockTransaction)-[r:PERFORMED_BY]->() RETURN count(r) AS actual }
+RETURN 'rel (:StockTransaction)-[:PERFORMED_BY]->' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///stock_adjustment.csv' AS row
+WITH row WHERE row.InventoryID IS NOT NULL AND row.InventoryID <> ''
+WITH count(row) AS expected
+CALL { MATCH (:StockAdjustment)-[r:ADJUSTS]->() RETURN count(r) AS actual }
+RETURN 'rel (:StockAdjustment)-[:ADJUSTS]->' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///stock_adjustment.csv' AS row
+WITH row WHERE row.EmployeeID IS NOT NULL AND row.EmployeeID <> ''
+WITH count(row) AS expected
+CALL { MATCH (:StockAdjustment)-[r:PERFORMED_BY]->() RETURN count(r) AS actual }
+RETURN 'rel (:StockAdjustment)-[:PERFORMED_BY]->' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///disposal_record.csv' AS row
+WITH row WHERE row.InventoryID IS NOT NULL AND row.InventoryID <> ''
+WITH count(row) AS expected
+CALL { MATCH (:DisposalRecord)-[r:DISPOSES_FROM]->() RETURN count(r) AS actual }
+RETURN 'rel (:DisposalRecord)-[:DISPOSES_FROM]->' AS item, expected, actual, expected = actual AS ok
+UNION ALL
+LOAD CSV WITH HEADERS FROM 'file:///disposal_record.csv' AS row
+WITH row WHERE row.EmployeeID IS NOT NULL AND row.EmployeeID <> ''
+WITH count(row) AS expected
+CALL { MATCH (:DisposalRecord)-[r:PERFORMED_BY]->() RETURN count(r) AS actual }
+RETURN 'rel (:DisposalRecord)-[:PERFORMED_BY]->' AS item, expected, actual, expected = actual AS ok;
+
+// ===== Part B: integrity and business-rule checks (all violations must be 0) =====
+
+MATCH (x:PurchaseOrderLine) WHERE NOT (x)-[:LINE_OF]->(:PurchaseOrder)
+RETURN 'PO line without order' AS check, count(x) AS violations
+UNION ALL
+MATCH (x:PurchaseOrderLine) WHERE NOT (x)-[:FOR_PRODUCT]->(:Product)
+RETURN 'PO line without product' AS check, count(x) AS violations
+UNION ALL
+MATCH (x:PurchaseOrder) WHERE NOT (x)-[:ORDERED_FROM]->(:Supplier)
+RETURN 'Purchase order without supplier' AS check, count(x) AS violations
+UNION ALL
+MATCH (x:PurchaseOrder) WHERE NOT (x)-[:CREATED_BY]->(:ProcurementEmployee)
+RETURN 'Purchase order not created by procurement employee' AS check, count(x) AS violations
+UNION ALL
+MATCH (x:GoodsReceipt) WHERE NOT (x)-[:RECEIPT_FOR]->(:PurchaseOrder)
+RETURN 'Goods receipt without order' AS check, count(x) AS violations
+UNION ALL
+MATCH (x:GoodsReceipt) WHERE NOT (x)-[:RECEIVED_BY]->(:WarehouseEmployee)
+RETURN 'Goods receipt not received by warehouse employee' AS check, count(x) AS violations
+UNION ALL
+MATCH (x:GoodsReceiptLine) WHERE NOT (x)-[:RECEIPT_LINE_OF]->(:GoodsReceipt)
+RETURN 'Receipt line without receipt' AS check, count(x) AS violations
+UNION ALL
+MATCH (x:GoodsReceiptLine) WHERE NOT (x)-[:MATCHES_LINE]->(:PurchaseOrderLine)
+RETURN 'Receipt line without PO line' AS check, count(x) AS violations
+UNION ALL
+MATCH (x:ProductBatch) WHERE NOT (x)-[:RECEIVED_AS]->(:GoodsReceiptLine)
+RETURN 'Batch without receipt line' AS check, count(x) AS violations
+UNION ALL
+MATCH (x:ProductBatch) WHERE NOT (x)-[:OF_PRODUCT]->(:Product)
+RETURN 'Batch without OF_PRODUCT shortcut' AS check, count(x) AS violations
+UNION ALL
+MATCH (x:StorageLocation) WHERE NOT (x)-[:IN_WAREHOUSE]->(:Warehouse)
+RETURN 'Storage location without warehouse' AS check, count(x) AS violations
+UNION ALL
+MATCH (x:Inventory) WHERE NOT (x)-[:OF_BATCH]->(:ProductBatch) OR NOT (x)-[:AT_LOCATION]->(:StorageLocation)
+RETURN 'Inventory without batch or location' AS check, count(x) AS violations
+UNION ALL
+MATCH (x:StockTransaction) WHERE NOT (x)-[:MOVES_BATCH]->(:ProductBatch) OR NOT (x)-[:PERFORMED_BY]->(:WarehouseEmployee)
+RETURN 'Transaction without batch or employee' AS check, count(x) AS violations
+UNION ALL
+MATCH (x:StockTransaction) WHERE NOT (x)-[:FROM_LOCATION]->() AND NOT (x)-[:TO_LOCATION]->()
+RETURN 'Transaction with neither FROM nor TO location' AS check, count(x) AS violations
+UNION ALL
+MATCH (x:StockAdjustment) WHERE NOT (x)-[:ADJUSTS]->(:Inventory) OR NOT (x)-[:PERFORMED_BY]->(:WarehouseEmployee)
+RETURN 'Adjustment without inventory or employee' AS check, count(x) AS violations
+UNION ALL
+MATCH (x:DisposalRecord) WHERE NOT (x)-[:DISPOSES_FROM]->(:Inventory) OR NOT (x)-[:PERFORMED_BY]->(:WarehouseEmployee)
+RETURN 'Disposal without inventory or employee' AS check, count(x) AS violations
+UNION ALL
+MATCH (x:Employee) WHERE NOT (x:ProcurementEmployee XOR x:WarehouseEmployee)
+RETURN 'Employee without exactly one subtype label (complete + disjoint)' AS check, count(x) AS violations
+UNION ALL
+MATCH (x:GoodsReceiptLine)-[:RECEIPT_LINE_OF]->(:GoodsReceipt)-[:RECEIPT_FOR]->(po1:PurchaseOrder) MATCH (x)-[:MATCHES_LINE]->(:PurchaseOrderLine)-[:LINE_OF]->(po2:PurchaseOrder) WHERE po1 <> po2
+RETURN 'Same-order rule broken (receipt line matches a line of a different order)' AS check, count(x) AS violations
+UNION ALL
+MATCH (x:ProductBatch)-[:OF_PRODUCT]->(p1:Product) MATCH (x)-[:RECEIVED_AS]->(:GoodsReceiptLine)-[:MATCHES_LINE]->(:PurchaseOrderLine)-[:FOR_PRODUCT]->(p2:Product) WHERE p1 <> p2
+RETURN 'OF_PRODUCT shortcut disagrees with 3-hop path' AS check, count(x) AS violations
+UNION ALL
+MATCH (x:Inventory) WHERE x.quantityOnHand < 0
+RETURN 'Negative quantity on hand' AS check, count(x) AS violations
+UNION ALL
+MATCH (x:PurchaseOrderLine)<-[:MATCHES_LINE]-(g:GoodsReceiptLine) WITH x, sum(g.quantityReceived) AS received WHERE received > x.quantityOrdered
+RETURN 'Received quantity above ordered quantity for a PO line' AS check, count(x) AS violations
+UNION ALL
+MATCH (x:ProductBatch) WHERE x.expiryDate < x.manufactureDate
+RETURN 'Expiry date before manufacture date' AS check, count(x) AS violations;
+
+// Schema picture for the report (compare with the draw.io model)
+CALL db.schema.visualization();
+
+
+// =====================================================================================================
+// PART 7. GRAPH VIEW OF THE SUPPLIER-PRODUCT NETWORK
+// =====================================================================================================
+MATCH (s:Supplier)-[r:SUPPLIED_PRODUCT]->(p:Product)
+RETURN s, r, p;
+
+
+
+

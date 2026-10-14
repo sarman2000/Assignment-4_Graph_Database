@@ -1,0 +1,11 @@
+ProductID,ProductName,SKU,CategoryID,UnitOfMeasure,UnitPrice
+P001,Frozen Chicken Breast 2kg,FCB-002KG,C001,Pack,19.99
+P002,Frozen Prawns 1kg,FPR-001KG,C001,Pack,22.5
+P003,Fresh Tofu 500g,FTU-500G,C002,Pack,5.2
+P004,Jasmine Rice 10kg,JRC-010KG,C003,Bag,26.9
+P005,Rice Noodles 500g,RNO-500G,C003,Pack,3.5
+P006,Coconut Milk 400ml,CNM-400ML,C003,Carton,2.3
+P007,Green Tea 500ml,GTE-500ML,C004,Carton,18.9
+P008,Mango Juice 1L,MGJ-001L,C004,Carton,21.5
+P009,Sweet Chilli Sauce 750ml,SCS-750ML,C005,Carton,7.9
+P010,Soy Sauce 1L,SYS-001L,C005,Carton,8.9

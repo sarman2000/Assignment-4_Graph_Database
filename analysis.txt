@@ -1,0 +1,391 @@
+// =====================================================================================================
+// PART 8. CENTRALITY ANALYSIS (GDS) ON THE AUFS DATA
+// =====================================================================================================
+
+// ---------------------------------------------------------------------------------------------
+// 1. Project the in-memory graph
+// ---------------------------------------------------------------------------------------------
+CALL gds.graph.drop('supplyNetwork', false);
+
+CALL gds.graph.project(
+  'supplyNetwork',
+  ['Supplier', 'Product'],
+  {SUPPLIED_PRODUCT: {orientation: 'UNDIRECTED'}}
+)
+YIELD graphName, nodeCount, relationshipCount;
+
+// ---------------------------------------------------------------------------------------------
+// 2. Run a wide range of centrality algorithms (mutate keeps the scores in the projection so they can be compared)
+// ---------------------------------------------------------------------------------------------
+// Degree: how many direct links (suppliers per product, products per supplier)
+CALL gds.degree.mutate('supplyNetwork', {mutateProperty: 'degree'}) YIELD nodePropertiesWritten;
+
+// PageRank: importance from the importance of neighbours
+CALL gds.pageRank.mutate('supplyNetwork', {mutateProperty: 'pageRank', maxIterations: 50, dampingFactor: 0.85})
+YIELD nodePropertiesWritten;
+
+// ArticleRank: PageRank variant that dampens the effect of low-degree neighbours (useful in bipartite networks)
+CALL gds.articleRank.mutate('supplyNetwork', {mutateProperty: 'articleRank', maxIterations: 50})
+YIELD nodePropertiesWritten;
+
+// Eigenvector: influence from being linked to well-connected nodes
+CALL gds.eigenvector.mutate('supplyNetwork', {mutateProperty: 'eigenvector', maxIterations: 50})
+YIELD nodePropertiesWritten;
+
+// Betweenness: how often a node sits on the shortest path between others = broker / single point of failure
+CALL gds.betweenness.mutate('supplyNetwork', {mutateProperty: 'betweenness'}) YIELD nodePropertiesWritten;
+
+// Closeness: how quickly a node can reach all others
+CALL gds.closeness.mutate('supplyNetwork', {mutateProperty: 'closeness'}) YIELD nodePropertiesWritten;
+
+
+// ---------------------------------------------------------------------------------------------
+// 3. Compare all algorithms side by side (one row per supplier or product)
+// ---------------------------------------------------------------------------------------------
+CALL gds.graph.nodeProperties.stream(
+  'supplyNetwork',
+  ['degree', 'pageRank', 'articleRank', 'eigenvector', 'betweenness', 'closeness'],
+  ['Supplier', 'Product']
+)
+YIELD nodeId, nodeProperty, propertyValue
+WITH gds.util.asNode(nodeId) AS n, nodeProperty, propertyValue
+RETURN labels(n)[0] AS type,
+       coalesce(n.supplierName, n.productName) AS name,
+       max(CASE nodeProperty WHEN 'degree' THEN propertyValue END) AS degree,
+       round(max(CASE nodeProperty WHEN 'pageRank' THEN propertyValue END) * 1000) / 1000 AS pageRank,
+       round(max(CASE nodeProperty WHEN 'articleRank' THEN propertyValue END) * 1000) / 1000 AS articleRank,
+       round(max(CASE nodeProperty WHEN 'eigenvector' THEN propertyValue END) * 1000) / 1000 AS eigenvector,
+       round(max(CASE nodeProperty WHEN 'betweenness' THEN propertyValue END) * 1000) / 1000 AS betweenness,
+       round(max(CASE nodeProperty WHEN 'closeness' THEN propertyValue END) * 1000) / 1000 AS closeness
+ORDER BY pageRank DESC;
+
+
+// ---------------------------------------------------------------------------------------------
+// 4. store the scores on the real nodes (so a dashboard can read them), then clean up
+// ---------------------------------------------------------------------------------------------
+CALL gds.pageRank.write('supplyNetwork', {writeProperty: 'supplyPageRank'}) YIELD nodePropertiesWritten;
+
+MATCH (n) WHERE n.supplyPageRank IS NOT NULL
+RETURN labels(n)[0] AS type, coalesce(n.supplierName, n.productName) AS name, n.supplyPageRank AS score
+ORDER BY score DESC LIMIT 10;
+
+CALL gds.graph.drop('supplyNetwork');
+
+// =====================================================================================================
+// PART 9. SIMILARITY ANALYSIS (GDS) AND SUPPLIER RESILIENCE
+// =====================================================================================================
+
+// ---------------------------------------------------------------------------------------------
+// 1. Project the in-memory graph: Supplier -[:SUPPLIED_PRODUCT]-> Product, keeping standardCost as a weight
+// ---------------------------------------------------------------------------------------------
+CALL gds.graph.drop('supplierProducts', false);
+
+CALL gds.graph.project(
+  'supplierProducts',
+  ['Supplier', 'Product'],
+  {SUPPLIED_PRODUCT: {properties: 'standardCost'}}
+)
+YIELD graphName, nodeCount, relationshipCount;
+
+// ---------------------------------------------------------------------------------------------
+// 2. Node Similarity, three metrics on the same data (unweighted: do two suppliers sell the same products?)
+// ---------------------------------------------------------------------------------------------
+// 2a. Jaccard: shared products / all distinct products of the pair (penalises a big difference in range size)
+CALL gds.nodeSimilarity.stream('supplierProducts', {similarityMetric: 'JACCARD'})
+YIELD node1, node2, similarity
+WITH gds.util.asNode(node1) AS a, gds.util.asNode(node2) AS b, node1, node2, similarity
+WHERE node1 < node2
+RETURN 'Jaccard' AS algorithm, a.supplierId AS supplier1, b.supplierId AS supplier2, round(similarity * 1000) / 1000 AS similarity
+ORDER BY similarity DESC;
+
+// 2b. Overlap: shared products / size of the SMALLER set (is one supplier's range contained in the other's?)
+CALL gds.nodeSimilarity.stream('supplierProducts', {similarityMetric: 'OVERLAP'})
+YIELD node1, node2, similarity
+WITH gds.util.asNode(node1) AS a, gds.util.asNode(node2) AS b, node1, node2, similarity
+WHERE node1 < node2
+RETURN 'Overlap' AS algorithm, a.supplierId AS supplier1, b.supplierId AS supplier2, round(similarity * 1000) / 1000 AS similarity
+ORDER BY similarity DESC;
+
+// 2c. Cosine: angle between product vectors (on binary data it rewards shared items less harshly than Jaccard)
+CALL gds.nodeSimilarity.stream('supplierProducts', {similarityMetric: 'COSINE'})
+YIELD node1, node2, similarity
+WITH gds.util.asNode(node1) AS a, gds.util.asNode(node2) AS b, node1, node2, similarity
+WHERE node1 < node2
+RETURN 'Cosine' AS algorithm, a.supplierId AS supplier1, b.supplierId AS supplier2, round(similarity * 1000) / 1000 AS similarity
+ORDER BY similarity DESC;
+
+
+// ---------------------------------------------------------------------------------------------
+// 3. Weighted Node Similarity: same products at a similar standardCost?
+// ---------------------------------------------------------------------------------------------
+CALL gds.nodeSimilarity.stream('supplierProducts', {similarityMetric: 'JACCARD', relationshipWeightProperty: 'standardCost'})
+YIELD node1, node2, similarity
+WITH gds.util.asNode(node1) AS a, gds.util.asNode(node2) AS b, node1, node2, similarity
+WHERE node1 < node2
+RETURN 'Weighted Jaccard (standardCost)' AS algorithm, a.supplierId AS supplier1, b.supplierId AS supplier2,
+       round(similarity * 1000) / 1000 AS similarity
+ORDER BY similarity DESC;
+
+// ---------------------------------------------------------------------------------------------
+// 4. Filtered Node Similarity: "who could replace S001?"
+// ---------------------------------------------------------------------------------------------
+MATCH (s:Supplier {supplierId: 'S001'})
+WITH id(s) AS sourceId
+CALL gds.nodeSimilarity.filtered.stream('supplierProducts', {
+  sourceNodeFilter: sourceId,
+  targetNodeFilter: 'Supplier',
+  topK: 3
+})
+YIELD node1, node2, similarity
+RETURN gds.util.asNode(node1).supplierName AS supplier,
+       gds.util.asNode(node2).supplierName AS possibleSubstitute,
+       round(similarity * 1000) / 1000 AS jaccard
+ORDER BY jaccard DESC;
+
+// ---------------------------------------------------------------------------------------------
+// 5. K-Nearest Neighbours on graph embeddings
+// ---------------------------------------------------------------------------------------------
+CALL gds.graph.drop('supplyEmbedding', false);
+
+CALL gds.graph.project(
+  'supplyEmbedding',
+  ['Supplier', 'Product'],
+  {SUPPLIED_PRODUCT: {orientation: 'UNDIRECTED'}}
+)
+YIELD graphName, nodeCount, relationshipCount;
+
+// FastRP
+CALL gds.fastRP.mutate('supplyEmbedding', {
+  embeddingDimension: 32,
+  iterationWeights: [0.0, 1.0, 1.0],
+  randomSeed: 42,
+  mutateProperty: 'embedding'
+})
+YIELD nodePropertiesWritten;
+
+CALL gds.knn.stream('supplyEmbedding', {
+  nodeLabels: ['Supplier'],
+  nodeProperties: ['embedding'],
+  topK: 2,
+  sampleRate: 1.0,
+  deltaThreshold: 0.0,
+  randomSeed: 42,
+  concurrency: 1
+})
+YIELD node1, node2, similarity
+RETURN gds.util.asNode(node1).supplierId AS supplier,
+       gds.util.asNode(node2).supplierId AS nearestNeighbour,
+       round(similarity * 1000) / 1000 AS embeddingSimilarity
+ORDER BY supplier, embeddingSimilarity DESC;
+
+// ---------------------------------------------------------------------------------------------
+// 6. Similarity FUNCTIONS: compare two lists directly in Cypher
+// ---------------------------------------------------------------------------------------------
+// 6a. Set-based: Jaccard and Overlap on each supplier's list of products
+MATCH (a:Supplier)-[:SUPPLIED_PRODUCT]->(p:Product)
+WITH a, collect(id(p)) AS productsA
+MATCH (b:Supplier)-[:SUPPLIED_PRODUCT]->(q:Product)
+WHERE a.supplierId < b.supplierId
+WITH a, productsA, b, collect(id(q)) AS productsB
+RETURN a.supplierId AS supplier1, b.supplierId AS supplier2,
+       round(gds.similarity.jaccard(productsA, productsB) * 1000) / 1000 AS jaccard,
+       round(gds.similarity.overlap(productsA, productsB) * 1000) / 1000 AS overlap
+ORDER BY jaccard DESC, supplier1, supplier2;
+
+// 6b. Vector-based: each supplier becomes a cost vector over all 10 products (0 = does not supply it)
+MATCH (p:Product)
+WITH p ORDER BY p.productId
+WITH collect(p) AS products
+MATCH (s:Supplier)
+WITH collect({id: s.supplierId,
+              v: [prod IN products | coalesce(head([(s)-[r:SUPPLIED_PRODUCT]->(prod) | r.standardCost]), 0.0)]}) AS rows
+UNWIND rows AS a
+UNWIND rows AS b
+WITH a, b WHERE a.id < b.id
+RETURN a.id AS supplier1, b.id AS supplier2,
+       round(gds.similarity.cosine(a.v, b.v) * 1000) / 1000 AS cosine,
+       round(gds.similarity.pearson(a.v, b.v) * 1000) / 1000 AS pearson,
+       round(gds.similarity.euclideanDistance(a.v, b.v) * 100) / 100 AS euclideanDistance,
+       round(gds.similarity.euclidean(a.v, b.v) * 1000) / 1000 AS euclideanSimilarity
+ORDER BY cosine DESC, supplier1, supplier2;
+
+// ---------------------------------------------------------------------------------------------
+// 7. Turn the result into a decision: write similarity back and combine it with single-source risk
+// ---------------------------------------------------------------------------------------------
+// 7a. Write mode: store SIMILAR_SUPPLIER relationships (with the Jaccard score) in the database
+CALL gds.nodeSimilarity.write('supplierProducts', {
+  similarityMetric: 'JACCARD',
+  topK: 3,
+  similarityCutoff: 0.1,
+  writeRelationshipType: 'SIMILAR_SUPPLIER',
+  writeProperty: 'jaccard'
+})
+YIELD nodesCompared, relationshipsWritten;
+
+// 7b. Resilience report: for each supplier, what is left uncovered if it fails, and who is the best substitute?
+MATCH (s:Supplier)-[:SUPPLIED_PRODUCT]->(p:Product)
+WITH s, p, size([(p)<-[:SUPPLIED_PRODUCT]-(o:Supplier) WHERE o <> s | o]) AS otherSuppliers
+WITH s, count(p) AS productsSupplied,
+     sum(CASE WHEN otherSuppliers = 0 THEN 1 ELSE 0 END) AS uncoveredIfSupplierFails,
+     collect(CASE WHEN otherSuppliers = 0 THEN p.productName END) AS uncoveredProducts
+RETURN s.supplierId AS supplierId, s.supplierName AS supplier, productsSupplied, uncoveredIfSupplierFails, uncoveredProducts,
+       [(s)-[sim:SIMILAR_SUPPLIER]->(alt:Supplier) | alt.supplierName + ' (' + toString(round(sim.jaccard * 100) / 100) + ')'] AS bestSubstitutes
+ORDER BY uncoveredIfSupplierFails DESC, supplierId;
+
+// ---------------------------------------------------------------------------------------------
+// 8. Clean up
+// ---------------------------------------------------------------------------------------------
+CALL gds.graph.drop('supplierProducts');
+CALL gds.graph.drop('supplyEmbedding');
+
+// =============================================================================================
+// PART 1. Generate the synthetic network and its ground truth
+// =============================================================================================
+CREATE INDEX syn_supplier_sid IF NOT EXISTS FOR (s:SynSupplier) ON (s.sid);
+CREATE INDEX syn_product_pid IF NOT EXISTS FOR (p:SynProduct) ON (p.pid);
+CALL db.awaitIndexes(300);
+
+UNWIND range(0, 199) AS sid CREATE (:SynSupplier {sid: sid, cluster: sid % 20});
+UNWIND range(0, 999) AS pid CREATE (:SynProduct {pid: pid, cluster: pid % 20});
+
+// family links (probability 0.25)
+MATCH (s:SynSupplier), (p:SynProduct)
+WHERE s.cluster = p.cluster AND rand() < 0.25
+CREATE (s)-[:SYN_SUPPLIES]->(p);
+
+// noise links: 3 random products per supplier
+MATCH (s:SynSupplier)
+UNWIND range(1, 3) AS k
+WITH s, toInteger(rand() * 1000) AS pid
+MATCH (p:SynProduct {pid: pid})
+MERGE (s)-[:SYN_SUPPLIES]->(p);
+
+// Centrality ground truth: products that only this supplier supplies
+MATCH (s:SynSupplier)
+SET s.uniqueProducts = COUNT {
+  (s)-[:SYN_SUPPLIES]->(p:SynProduct)
+  WHERE NOT EXISTS { (p)<-[:SYN_SUPPLIES]-(o:SynSupplier) WHERE o <> s }
+};
+
+// Check: expect about 200 suppliers, 1000 products, roughly 3,000 links
+CALL { MATCH (s:SynSupplier) RETURN count(s) AS suppliers }
+CALL { MATCH (p:SynProduct) RETURN count(p) AS products }
+CALL { MATCH ()-[r:SYN_SUPPLIES]->() RETURN count(r) AS links }
+CALL { MATCH (s:SynSupplier) RETURN round(avg(s.uniqueProducts) * 100) / 100 AS avgUniqueProductsPerSupplier }
+RETURN suppliers, products, links, avgUniqueProductsPerSupplier;
+
+
+// =============================================================================================
+// PART 2. Similarity: Node Similarity metrics, precision@5 against the family truth
+// =============================================================================================
+CALL gds.graph.drop('synSim', false);
+CALL gds.graph.project('synSim', ['SynSupplier', 'SynProduct'], 'SYN_SUPPLIES')
+YIELD graphName, nodeCount, relationshipCount;
+
+UNWIND ['JACCARD', 'OVERLAP', 'COSINE'] AS metric
+CALL gds.nodeSimilarity.stream('synSim', {similarityMetric: metric, topK: 5})
+YIELD node1, node2
+WITH metric, gds.util.asNode(node1) AS a, gds.util.asNode(node2) AS b
+RETURN metric AS algorithm, count(*) AS pairs,
+       round(1000.0 * sum(CASE WHEN a.cluster = b.cluster THEN 1 ELSE 0 END) / count(*)) / 1000 AS precisionAt5
+ORDER BY precisionAt5 DESC;
+
+// Runtime of the same three runs
+UNWIND ['JACCARD', 'OVERLAP', 'COSINE'] AS metric
+CALL gds.nodeSimilarity.stats('synSim', {similarityMetric: metric, topK: 5})
+YIELD computeMillis, similarityPairs
+RETURN metric AS algorithm, computeMillis, similarityPairs;
+
+
+// =============================================================================================
+// PART 3. Similarity: kNN on FastRP embeddings (a competing, structure-based approach), same metric
+// =============================================================================================
+CALL gds.graph.drop('synEmb', false);
+CALL gds.graph.project('synEmb', ['SynSupplier', 'SynProduct'], {SYN_SUPPLIES: {orientation: 'UNDIRECTED'}})
+YIELD graphName, nodeCount, relationshipCount;
+
+CALL gds.fastRP.mutate('synEmb', {embeddingDimension: 128, iterationWeights: [0.0, 1.0, 1.0], randomSeed: 42,
+                                  mutateProperty: 'embedding'})
+YIELD nodePropertiesWritten, computeMillis AS embeddingMillis;
+
+CALL gds.knn.stream('synEmb', {nodeLabels: ['SynSupplier'], nodeProperties: ['embedding'], topK: 5,
+                               sampleRate: 1.0, deltaThreshold: 0.0, randomSeed: 42, concurrency: 1})
+YIELD node1, node2
+WITH gds.util.asNode(node1) AS a, gds.util.asNode(node2) AS b
+RETURN 'kNN on FastRP' AS algorithm, count(*) AS pairs,
+       round(1000.0 * sum(CASE WHEN a.cluster = b.cluster THEN 1 ELSE 0 END) / count(*)) / 1000 AS precisionAt5;
+
+CALL gds.knn.stats('synEmb', {nodeLabels: ['SynSupplier'], nodeProperties: ['embedding'], topK: 5,
+                              sampleRate: 1.0, deltaThreshold: 0.0, randomSeed: 42, concurrency: 1})
+YIELD computeMillis, nodePairsConsidered
+RETURN 'kNN on FastRP' AS algorithm, computeMillis, nodePairsConsidered;
+
+// =============================================================================================
+// PART 4. Centrality: all six algorithms on the same network, then score against the criticality truth
+// =============================================================================================
+CALL gds.graph.drop('synNet', false);
+CALL gds.graph.project('synNet', ['SynSupplier', 'SynProduct'], {SYN_SUPPLIES: {orientation: 'UNDIRECTED'}})
+YIELD graphName, nodeCount, relationshipCount;
+
+CALL gds.degree.mutate('synNet', {mutateProperty: 'degree'}) YIELD nodePropertiesWritten;
+CALL gds.pageRank.mutate('synNet', {mutateProperty: 'pageRank', maxIterations: 50, dampingFactor: 0.85}) YIELD nodePropertiesWritten;
+CALL gds.articleRank.mutate('synNet', {mutateProperty: 'articleRank', maxIterations: 50}) YIELD nodePropertiesWritten;
+CALL gds.eigenvector.mutate('synNet', {mutateProperty: 'eigenvector', maxIterations: 50}) YIELD nodePropertiesWritten;
+CALL gds.betweenness.mutate('synNet', {mutateProperty: 'betweenness'}) YIELD nodePropertiesWritten;
+CALL gds.closeness.mutate('synNet', {mutateProperty: 'closeness'}) YIELD nodePropertiesWritten;
+
+// Capture %: how much of the best possible criticality does each algorithm's top 10 suppliers capture?
+CALL { MATCH (s:SynSupplier) WITH s ORDER BY s.uniqueProducts DESC LIMIT 10 RETURN avg(s.uniqueProducts) AS bestPossible }
+CALL { MATCH (s:SynSupplier) RETURN avg(s.uniqueProducts) AS randomBaseline }
+CALL gds.graph.nodeProperties.stream('synNet',
+     ['degree', 'pageRank', 'articleRank', 'eigenvector', 'betweenness', 'closeness'], ['SynSupplier'])
+YIELD nodeId, nodeProperty, propertyValue
+WITH bestPossible, randomBaseline, nodeProperty AS algorithm, gds.util.asNode(nodeId) AS s, propertyValue AS score
+ORDER BY algorithm, score DESC
+WITH bestPossible, randomBaseline, algorithm, collect(s.uniqueProducts)[0..10] AS top10
+WITH bestPossible, randomBaseline, algorithm, reduce(t = 0.0, x IN top10 | t + x) / size(top10) AS meanCriticality
+RETURN algorithm,
+       round(meanCriticality * 100) / 100 AS meanCriticalityTop10,
+       round(bestPossible * 100) / 100 AS bestPossible,
+       round(randomBaseline * 100) / 100 AS randomBaseline,
+       round(100 * meanCriticality / bestPossible) AS capturePct
+ORDER BY capturePct DESC;
+
+// =============================================================================================
+// PART 5. Centrality: runtime of each algorithm (stats mode)
+// =============================================================================================
+CALL gds.degree.stats('synNet') YIELD computeMillis RETURN 'degree' AS algorithm, computeMillis
+UNION ALL
+CALL gds.pageRank.stats('synNet', {maxIterations: 50}) YIELD computeMillis RETURN 'pageRank' AS algorithm, computeMillis
+UNION ALL
+CALL gds.articleRank.stats('synNet', {maxIterations: 50}) YIELD computeMillis RETURN 'articleRank' AS algorithm, computeMillis
+UNION ALL
+CALL gds.eigenvector.stats('synNet', {maxIterations: 50}) YIELD computeMillis RETURN 'eigenvector' AS algorithm, computeMillis
+UNION ALL
+CALL gds.betweenness.stats('synNet') YIELD computeMillis RETURN 'betweenness' AS algorithm, computeMillis
+UNION ALL
+CALL gds.closeness.stats('synNet') YIELD computeMillis RETURN 'closeness' AS algorithm, computeMillis;
+
+// =============================================================================================
+// PART 6. Sensitivity: does the PageRank damping factor change the answer?
+// =============================================================================================
+UNWIND [0.5, 0.7, 0.85, 0.95] AS damping
+CALL gds.pageRank.stream('synNet', {dampingFactor: damping, maxIterations: 50})
+YIELD nodeId, score
+WITH damping, gds.util.asNode(nodeId) AS n, score
+WHERE n:SynSupplier
+ORDER BY damping, score DESC
+WITH damping, collect(n.uniqueProducts)[0..10] AS top10
+RETURN damping AS dampingFactor, reduce(t = 0.0, x IN top10 | t + x) / size(top10) AS meanCriticalityTop10
+ORDER BY dampingFactor;
+
+// =============================================================================================
+// PART 7. CLEAN UP
+// =============================================================================================
+CALL gds.graph.drop('synSim', false);
+CALL gds.graph.drop('synEmb', false);
+CALL gds.graph.drop('synNet', false);
+:auto MATCH (n) WHERE n:SynSupplier OR n:SynProduct CALL { WITH n DETACH DELETE n } IN TRANSACTIONS OF 1000 ROWS;
+DROP INDEX syn_supplier_sid IF EXISTS;
+DROP INDEX syn_product_pid IF EXISTS;
+MATCH (n) WHERE n:SynSupplier OR n:SynProduct RETURN count(n) AS syntheticLeft;
