@@ -1,2 +1,0 @@
-AdjustmentID,InventoryID,EmployeeID,AdjustmentDate,QuantityChange,Reason
-ADJ001,INV009,E005,2026-08-20,-2,Cycle count discrepancy: 2 units found damaged during stocktake

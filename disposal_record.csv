@@ -1,2 +1,0 @@
-DisposalID,InventoryID,EmployeeID,DisposalDate,QuantityDisposed,Reason
-DISP001,INV006,E004,2026-08-25,5,Damaged packaging identified during quality inspection
